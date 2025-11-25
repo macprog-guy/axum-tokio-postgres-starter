@@ -66,3 +66,41 @@ jobs:
         with:
           command: build
           args: --release --all-features
+
+  # ---------------------------------------------------------------------------
+  #
+  # Audit
+  #
+  # We only run cargo-audit on changes to Cargo.toml or Cargo.lock
+  #
+  # ---------------------------------------------------------------------------
+
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: check modified files
+        id: cargo_files_changed
+        run: |
+            echo "=============== list modified files ==============="
+            git diff --name-only HEAD^ HEAD
+            
+            echo "========== check if Cargo.lock or Cargo.toml have changed =========="
+            git diff --name-only HEAD^ HEAD | grep -E '(Cargo\.lock|Cargo\.toml)'
+            
+            if [[ "$?" -eq "0" ]]; then
+              echo "::set-output name=run_audit::true"
+            else
+              echo "::set-output name=run_audit::false"
+            fi
+
+      - uses: actions-rs/audit-check@v1
+        if: steps.cargo_files_changed.outputs.run_audit == 'true'
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
