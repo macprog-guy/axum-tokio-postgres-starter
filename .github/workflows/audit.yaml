@@ -1,11 +1,11 @@
-name: Build axum-tokio-postgres library
+name: Run cargo audit
 
 on: 
   push:
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
-      
+
 jobs:
   audit:
     name: Cargo Audit
