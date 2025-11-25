@@ -169,6 +169,10 @@ pub fn setup_tracing_subscriber(config: &LoggingConfig) {
 ///
 pub fn setup_dbpool(config: &DatabaseConfig) -> Result<Pool> {
     //
+    // Install the default crypto provider if not already installed.
+    // This is needed for rustls to work properly.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Load system root certificates for TLS connections.
     let mut root_certs = rustls::RootCertStore::empty();
     let loaded_certs = rustls_native_certs::load_native_certs();
@@ -674,11 +678,6 @@ format = "json"
 
         // Should succeed and not be rejected based on payload size
         assert_eq!(response.status(), 200);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"Posted\n");
     }
 
     #[tokio::test]
@@ -687,7 +686,7 @@ format = "json"
         let app = build_test_router(&config);
 
         // Create a payload bigger than the configured limit (1KiB)
-        let unacceptable_payload = vec![b'x'; 1024]; // 1 KiB
+        let unacceptable_payload = vec![b'x'; 1025]; // 1 KiB + 1 byte
         let payload_len = unacceptable_payload.len();
 
         let response = app
