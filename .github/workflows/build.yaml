@@ -11,6 +11,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: actions-rs/cargo@v1
         with:
           command: test
@@ -18,3 +19,6 @@ jobs:
         with:
           command: build
           args: --release --all-features
+      - uses: actions/publish-artifact@v1
+        with:
+          name: axum-tokio-postgres-starter-latest
