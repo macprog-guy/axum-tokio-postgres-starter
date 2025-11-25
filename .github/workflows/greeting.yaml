@@ -9,6 +9,12 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+        
+    - name: Echo username
+      shell: bash
+      run: |
+        echo "Hello, ${{ github.actor }}!"
+        
     - uses: actions/first-interaction@v1
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
