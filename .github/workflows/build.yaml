@@ -8,9 +8,6 @@ jobs:
   #
   # Lint
   #
-  # Since we don't want to lint code that isn't in our repo, we prevent 
-  # clippy from fetching dependencies from the network by using --offline.
-  #
   # ---------------------------------------------------------------------------
 
   lint:
@@ -24,7 +21,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --no-deps --offline -- -D warnings
+          args: --no-deps -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Test
