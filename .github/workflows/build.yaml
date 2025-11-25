@@ -3,9 +3,53 @@ name: Build axum-tokio-postgres library
 on: [push]
 
 jobs:
-  build_and_test:
-    name: Build & Test
+
+  # ---------------------------------------------------------------------------
+  # Lint
+  # ---------------------------------------------------------------------------
+
+  lint:
+    name: Clippy
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --no-deps -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Test
+  # ---------------------------------------------------------------------------
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"    
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+  # ---------------------------------------------------------------------------
+  # Build
+  # ---------------------------------------------------------------------------
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"    
