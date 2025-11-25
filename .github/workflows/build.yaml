@@ -6,6 +6,9 @@ jobs:
   build_and_test:
     name: Rust project
     runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"    
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
