@@ -1,0 +1,18 @@
+name: Linting of source code
+
+on: [push]
+
+jobs:
+  lint:
+    name: Cargo Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -D warnings

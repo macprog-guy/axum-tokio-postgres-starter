@@ -35,9 +35,9 @@ use {
 
 pub async fn start_server() -> Result<()> {
     // Output the current version of the service
-    const PACKAGE_NAME: &'static str = env!("CARGO_PKG_NAME");
-    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-    println!("Starting {} version {}...", PACKAGE_NAME, VERSION);
+    const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    println!("Starting {PACKAGE_NAME} version {VERSION}...");
 
     // Ensure that we have a valid RUST_ENV variable
     let env: config::RuntimeEnv = env::var("RUST_ENV")
@@ -88,8 +88,8 @@ pub fn setup_http_service<S: Clone + Send + Sync + 'static>(
 
     if with_prometheus {
         // Setup Prometheus metrics collection
-        const PACKAGE_NAME: &'static str = env!("CARGO_PKG_NAME");
-        let metrics_path: &'static str = Box::leak(config.routes.metrics.clone().into_boxed_str());
+        const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
+        let metrics_path: &str = Box::leak(config.routes.metrics.clone().into_boxed_str());
         let (prometheus_layer, metrics_handle) = PrometheusMetricLayerBuilder::new()
             .with_prefix(PACKAGE_NAME)
             .with_ignore_pattern(metrics_path)

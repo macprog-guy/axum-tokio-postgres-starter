@@ -1,10 +1,10 @@
-name: Build axum-libra
+name: Build axum-tokio-postgres library
 
 on: [push]
 
 jobs:
   build_and_test:
-    name: Rust project
+    name: Build & Test
     runs-on: ubuntu-latest
     env:
       SCCACHE_GHA_ENABLED: "true"
