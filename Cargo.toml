@@ -1,5 +1,5 @@
 [package]
-name = "axum-tokio"
+name = "pictet-axum-service"
 version = "0.1.0"
 edition = "2024"
 authors = ["Eric Methot <emethot@pictet.com>"]

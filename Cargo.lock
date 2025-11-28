@@ -198,40 +198,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-tokio"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-prometheus",
- "base64",
- "byte-unit",
- "deadpool",
- "deadpool-postgres",
- "dotenvy",
- "http",
- "humantime",
- "humantime-serde",
- "mimalloc",
- "regex",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "toml",
- "tower",
- "tower-http",
- "tower_governor",
- "tracing",
- "tracing-error",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1252,6 +1218,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pictet-axum-service"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-prometheus",
+ "base64",
+ "byte-unit",
+ "deadpool",
+ "deadpool-postgres",
+ "dotenvy",
+ "http",
+ "humantime",
+ "humantime-serde",
+ "mimalloc",
+ "regex",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "toml",
+ "tower",
+ "tower-http",
+ "tower_governor",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
