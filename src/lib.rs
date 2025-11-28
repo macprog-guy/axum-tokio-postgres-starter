@@ -31,7 +31,7 @@
 //!
 //! ```rust,no_run
 //! use axum::{Router, routing::get};
-//! use axum_tokio::{Config, Result, RouterConfigurator};
+//! use pictet_axum_service::{Config, Result, RouterConfigurator};
 //! use std::sync::Arc;
 //!
 //! #[derive(Debug, Default, Clone)]
@@ -106,7 +106,7 @@
 //!
 //! ```rust,no_run
 //! use axum::{Router, routing::get};
-//! use axum_tokio::{Config, Result, RouterConfigurator};
+//! use pictet_axum_service::{Config, Result, RouterConfigurator};
 //!
 //! async fn get_count() -> String {
 //!     format!("Count: {}", 42)
@@ -126,7 +126,7 @@
 //! ### Custom Middleware Configuration
 //!
 //! ```rust,no_run
-//! use axum_tokio::Config;
+//! use pictet_axum_service::Config;
 //! use byte_unit::Byte;
 //!
 //! let mut config = Config::default();
@@ -148,7 +148,7 @@
 //! The library uses a custom [`Result`] type alias that wraps [`Error`]:
 //!
 //! ```rust
-//! use axum_tokio::{Result, Error};
+//! use pictet_axum_service::{Result, Error};
 //!
 //! fn my_function() -> Result<String> {
 //!     Ok("success".to_string())
@@ -160,7 +160,7 @@
 //! When writing tests, disable Prometheus metrics to avoid global registry conflicts:
 //!
 //! ```rust
-//! # use axum_tokio::Config;
+//! # use pictet_axum_service::Config;
 //! let mut config = Config::default();
 //! config.http.with_metrics = false;
 //! ```
