@@ -20,22 +20,22 @@ jobs:
   #
   # ---------------------------------------------------------------------------
 
-  # lint:
-  #   name: Clippy
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     SCCACHE_GHA_ENABLED: "true"
-  #     RUSTC_WRAPPER: "sccache"    
-  #   steps:
-  #     - uses: actions/checkout@v2
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - uses: mozilla-actions/sccache-action@v0.0.9
-  #     - uses: actions-rs/cargo@v1
-  #       with:
-  #         command: clippy
-  #         args: --no-deps -- -D warnings
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"    
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --no-deps -- -D warnings
 
   # ---------------------------------------------------------------------------
   #
@@ -48,21 +48,21 @@ jobs:
   #
   # ---------------------------------------------------------------------------
 
-  # test:
-  #   name: Test
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     SCCACHE_GHA_ENABLED: "true"
-  #     RUSTC_WRAPPER: "sccache"    
-  #   steps:
-  #     - uses: actions/checkout@v2
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - uses: mozilla-actions/sccache-action@v0.0.9
-  #     - uses: actions-rs/cargo@v1
-  #       with:
-  #         command: test
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"    
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
 
 
   # ---------------------------------------------------------------------------
@@ -75,25 +75,25 @@ jobs:
   #
   # ---------------------------------------------------------------------------
 
-  # audit:
-  #   name: Cargo Audit
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     SCCACHE_GHA_ENABLED: "true"
-  #     RUSTC_WRAPPER: "sccache"    
-  #   steps:
-  #     - uses: actions/checkout@v2
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #     - uses: mozilla-actions/sccache-action@v0.0.9
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"    
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
-  #     - uses: actions-rs/install@v0.1
-  #       with:
-  #         crate: cargo-audit
-  #         version: latest
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-audit
+          version: latest
 
-  #     - run: cargo audit --ignore RUSTSEC-2023-0071
+      - run: cargo audit --ignore RUSTSEC-2023-0071
 
 
   # ---------------------------------------------------------------------------
@@ -117,4 +117,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: target/llvm-cov/html/index.html
+          path: target/llvm-cov/html
+
