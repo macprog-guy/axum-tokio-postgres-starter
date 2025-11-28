@@ -110,7 +110,6 @@ jobs:
         with:
           toolchain: nightly
           override: true
-      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: actions-rs/cargo@v1
         with:
           command: test
