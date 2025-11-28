@@ -1,12 +1,24 @@
-name: Build axum-tokio-postgres library
+name: Test & QA for the Pictet axum-tokio crate
 
 on: [pull_request_target, workflow_dispatch]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"    
 
 jobs:
 
   # ---------------------------------------------------------------------------
   #
   # Lint
+  #
+  # We run clippy on our codebase to ensure minimal code quality.
+  # Of course this is not a substitute for human code review!
   #
   # ---------------------------------------------------------------------------
 
@@ -18,22 +30,26 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
           args: --no-deps -- -D warnings
 
   # ---------------------------------------------------------------------------
+  #
   # Test
+  #
+  # Run our test suite to ensure that we don't break anything.
+  # If we do break something and it's not caught here, then we need to fix it
+  # and add a new test to cover the case! Don't be shy to use AI to help you
+  # write tests.
+  #
   # ---------------------------------------------------------------------------
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: lint
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"    
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -44,43 +60,20 @@ jobs:
         with:
           command: test
 
-  # ---------------------------------------------------------------------------
-  # Build
-  # ---------------------------------------------------------------------------
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: test
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"    
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --all-features
 
   # ---------------------------------------------------------------------------
   #
   # Audit
   #
   # We only run cargo-audit on changes to Cargo.toml or Cargo.lock
+  # There are some low severity issues that we are ignoring for now because
+  # the crate maintainers have not or will not fixed them.
   #
   # ---------------------------------------------------------------------------
 
   audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -94,3 +87,29 @@ jobs:
           version: latest
 
       - run: cargo audit --ignore RUSTSEC-2023-0071
+
+
+  # ---------------------------------------------------------------------------
+  #
+  # Coverage
+  #
+  # ---------------------------------------------------------------------------
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features --no-fail-fast
+        env:
+          CARGO_INCREMENTAL: '0'
+          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
+          RUSTDOCFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
+      - uses: actions-rs/grcov@v0.1

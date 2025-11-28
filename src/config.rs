@@ -1,85 +1,167 @@
-#![allow(unused)]
+//!
+//! Configuration structures and utilities for wiring up the application or service.
+//!
+//! A configuration can be created in many ways:
+//! - From an environment-specific TOML file via `Config::from_env_toml`
+//! - From a TOML string via `Config::from_toml`
+//! - Constructed programmatically via the builder methods on `Config`
+//!
+//! In both TOML-based methods, environment variables can be referenced in the TOML
+//! using the {{ VAR_NAME }} syntax, and they will be substituted with the corresponding
+//! environment variable value. This is done via the `replace_handlebars_with_env`
+//! function and prevents sensitive information from being stored directly in the
+//! TOML files.
+//!
+//! Configuration is split into logical sections, each represented by their own struct:
+//!
+//! - `HttpConfig` for HTTP server settings
+//! - `DatabaseConfig` for database connection pool settings
+//! - `LoggingConfig` for logging and tracing settings
+//!
+//!
+pub use byte_unit::Byte;
 use {
-    crate::{Error, Result},
-    deadpool_postgres::Pool,
-    regex::{Captures, Regex},
+    crate::{Error, Result, replace_handlebars_with_env},
     serde::Deserialize,
-    std::{env, fs, str::FromStr, sync::LazyLock, time::Duration},
+    std::{env, fs, str::FromStr, time::Duration},
 };
 
-static HANDLEBAR_REGEXP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{\{\s*([A-Z0-9_]+)\s*\}\}").unwrap());
-
-#[derive(Debug)]
-pub enum RuntimeEnv {
-    Dev,
-    Tuni,
-    Intg,
-    Ctlq,
-    CtlqM1,
-    Prod,
-    ProdM1,
-}
-
-impl RuntimeEnv {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RuntimeEnv::Dev => "dev",
-            RuntimeEnv::Tuni => "tuni",
-            RuntimeEnv::Intg => "intg",
-            RuntimeEnv::Ctlq => "ctlq",
-            RuntimeEnv::CtlqM1 => "ctlq-m1",
-            RuntimeEnv::Prod => "prod",
-            RuntimeEnv::ProdM1 => "prod-m1",
-        }
-    }
-}
-
-impl FromStr for RuntimeEnv {
-    type Err = Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "dev" => Ok(RuntimeEnv::Dev),
-            "tuni" => Ok(RuntimeEnv::Tuni),
-            "intg" => Ok(RuntimeEnv::Intg),
-            "ctlq" => Ok(RuntimeEnv::Ctlq),
-            "ctlq-m1" | "ctlqm1" => Ok(RuntimeEnv::CtlqM1),
-            "prod" => Ok(RuntimeEnv::Prod),
-            "prod-m1" | "prodm1" => Ok(RuntimeEnv::ProdM1),
-            _ => Err(Error::UnsupportedEnv(s.into())),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Config {
-    pub database: DatabaseConfig,
     pub http: HttpConfig,
+    #[cfg(feature = "postgres")]
+    pub database: DatabaseConfig,
     pub logging: LoggingConfig,
 }
 
-///
-/// Configuration for the database connection pool.
-///
-#[derive(Debug, Deserialize)]
-pub struct DatabaseConfig {
-    /// Database connection URL.
-    /// This should be a valid Postgres connection string in URL format.
-    /// For example, "postgres://user:password@localhost:5432/database".
-    /// This value is required.
-    pub url: String,
-    #[serde(default = "default_max_pool_size")]
+impl Config {
+    ///
+    /// Loads the configuration from a file based on the RUST_ENV environment variable.
+    /// If RUST_ENV is not set, defaults to "prod".
+    ///
+    pub fn from_rust_env() -> Result<Config> {
+        let env = env::var("RUST_ENV").unwrap_or_else(|_| "prod".into());
+        Self::from_toml_file(env)
+    }
 
-    /// Sets the maximum number of connections in the pool.
-    /// By default `max_pool_size` is set to 2.
-    pub max_pool_size: u8,
+    ///
+    /// Given an environment name, loads the corresponding configuration file,
+    /// substitutes any environment variables, and returns a Config struct.
+    /// The configuration file is expected to be located at "config/{env}.toml"
+    /// where {env} is the string representation of the RuntimeEnv.
+    ///
+    pub fn from_toml_file(env: impl AsRef<str>) -> Result<Config> {
+        let path = format!("config/{}.toml", env.as_ref());
+        let text = fs::read_to_string(path)?;
+        Self::from_toml(&text)
+    }
 
-    /// Maximum idle time for connections in the pool.
-    /// Connections that have been idle for longer than this duration
-    /// will be closed. For example, a value of "5m" would set the
-    /// maximum idle time to 5 minutes. By default `max_idle_time` is None.
-    #[serde(default, with = "humantime_serde")]
-    pub max_idle_time: Option<Duration>,
+    ///
+    /// Parses a configuration string in TOML format into a Config struct.
+    ///
+    pub fn from_toml(toml_str: &str) -> Result<Config> {
+        replace_handlebars_with_env(toml_str).parse()
+    }
+
+    /// Sets the HTTP server bind address of the HttpConfig.
+    pub fn with_bind_addr<S: AsRef<str>>(mut self, addr: S) -> Self {
+        self.http.with_bind_addr(addr);
+        self
+    }
+
+    /// Sets the HTTP server bind port of the HttpConfig.
+    pub fn with_bind_port(mut self, port: u16) -> Self {
+        self.http.bind_port = port;
+        self
+    }
+
+    /// Sets the maximum number of concurrent requests of the HttpConfig.
+    pub fn with_max_concurrent_requests(mut self, max: u32) -> Self {
+        self.http.max_concurrent_requests = max;
+        self
+    }
+
+    /// Sets the request timeout duration of the HttpConfig.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.http.request_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_max_payload_size_bytes(mut self, size: u64) -> Self {
+        self.http.max_payload_size_bytes = Byte::from_u64(size);
+        self
+    }
+
+    /// Enables or disables compression support in the HttpConfig.
+    pub fn with_compression(mut self, enable: bool) -> Self {
+        self.http.support_compression = enable;
+        self
+    }
+
+    /// Enables or disables trailing slash trimming in the HttpConfig.
+    pub fn with_trim_trailing_slash(mut self, enable: bool) -> Self {
+        self.http.trim_trailing_slash = enable;
+        self
+    }
+
+    /// Sets the liveness route path of the HttpConfig.
+    pub fn with_liveness_route(mut self, route: &str) -> Self {
+        self.http.liveness_route = route.into();
+        self
+    }
+
+    /// Sets the readiness route path of the HttpConfig.
+    pub fn with_readiness_route(mut self, route: &str) -> Self {
+        self.http.readiness_route = route.into();
+        self
+    }
+
+    /// Sets the metrics route path of the HttpConfig.
+    pub fn with_metrics_route(mut self, route: &str) -> Self {
+        self.http.metrics_route = route.into();
+        self
+    }
+
+    /// Sets the Postgres database connection URL of the DatabaseConfig.
+    #[cfg(feature = "postgres")]
+    pub fn with_pg_url(mut self, url: &str) -> Self {
+        self.database.url = url.into();
+        self
+    }
+
+    /// Sets the maximum pool size of the DatabaseConfig.
+    #[cfg(feature = "postgres")]
+    pub fn with_pg_max_pool_size(mut self, size: u8) -> Self {
+        self.database.max_pool_size = size;
+        self
+    }
+
+    /// Sets the maximum idle time duration of the DatabaseConfig.
+    #[cfg(feature = "postgres")]
+    pub fn with_pg_max_idle_time(mut self, duration: Duration) -> Self {
+        self.database.max_idle_time = Some(duration);
+        self
+    }
+
+    /// Sets the log format of the LoggingConfig.
+    pub fn with_log_format(mut self, format: LogFormat) -> Self {
+        self.logging.format = format;
+        self
+    }
+}
+
+///
+/// Parses a configuration string with references to environment variables
+/// into a Config struct by substituting the environment variables and then
+/// parsing the resulting TOML.
+///
+impl FromStr for Config {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        let config_file = replace_handlebars_with_env(s);
+        let config = toml::from_str::<Config>(&config_file)?;
+        Ok(config)
+    }
 }
 
 ///
@@ -93,20 +175,26 @@ pub struct DatabaseConfig {
 pub struct HttpConfig {
     /// IP address to bind the HTTP server to
     /// The default `bind_addr` is "127.0.0.1".
-    #[serde(default = "default_bind_addr")]
+    #[serde(default = "HttpConfig::default_bind_addr")]
     pub bind_addr: String,
 
     /// Port to bind the HTTP server to
     /// The default `bind_port` is 3000.
-    #[serde(default = "default_bind_port")]
+    #[serde(default = "HttpConfig::default_bind_port")]
     pub bind_port: u16,
 
     /// Maximum number of concurrent requests to handle.
     /// If the number of concurrent requests exceeds this number, new requests
     /// will be rejected with a 503 Service Unavailable response.
     /// By default `max_concurrent_requests` is set to 2048.
-    #[serde(default = "default_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
+    #[serde(default = "HttpConfig::default_max_concurrent_requests")]
+    pub max_concurrent_requests: u32,
+
+    /// Maximum number of request per second (per IP address).
+    /// If the rate is exceeded, new requests to the server will be rejected
+    /// with a 429 Too Many Requests. The default is 100 requests per second.
+    #[serde(default = "HttpConfig::default_max_request_per_sec")]
+    pub max_request_per_sec: u32,
 
     /// Maximum allowed time for a request to complete before timing out.
     /// If a request takes longer than this it will be aborted with a 408
@@ -127,56 +215,116 @@ pub struct HttpConfig {
     #[serde(default)]
     pub support_compression: bool,
 
+    /// Whether or not to expose Prometheus metrics endpoint.
+    /// By default `with_metrics` is set to true.
+    #[serde(default = "HttpConfig::default_with_metrics")]
+    pub with_metrics: bool,
+
     /// Whether or not to trim trailing slashes from the request path.
     /// By default `trim_trailing_slash` is set to true.
-    #[serde(default = "default_trim_trailing_slash")]
+    #[serde(default = "HttpConfig::default_trim_trailing_slash")]
     pub trim_trailing_slash: bool,
 
-    /// Configuration for specific HTTP routes
-    pub routes: HttpRoutesConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HttpRoutesConfig {
     /// Route for liveness checks.
     /// By default `liveness` is "/live".
-    #[serde(default = "default_health_route")]
-    pub liveness: String,
+    #[serde(default = "HttpConfig::default_liveness_route")]
+    pub liveness_route: String,
 
     /// Route for readiness checks.
     /// The readiness check will return a 429 Too Many Requests when unable
     /// to handle the load. By default `readiness` is set to "/ready".
-    #[serde(default = "default_readiness_route")]
-    pub readiness: String,
+    #[serde(default = "HttpConfig::default_readiness_route")]
+    pub readiness_route: String,
 
     /// Route for metrics.
     /// Our Kubernetes infrastructure can scrape this endpoint for
     /// Prometheus metrics. By default `metrics` is set to "/metrics".
-    #[serde(default = "default_metrics_route")]
-    pub metrics: String,
+    #[serde(default = "HttpConfig::default_metrics_route")]
+    pub metrics_route: String,
+}
+
+impl HttpConfig {
+    ///
+    /// Returns the full bind address as a string in the format "IP:PORT".
+    ///
+    pub fn full_bind_addr(&self) -> String {
+        format!("{}:{}", self.bind_addr, self.bind_port)
+    }
+
+    pub fn with_bind_addr<S: AsRef<str>>(&mut self, addr: S) -> &mut Self {
+        self.bind_addr = addr.as_ref().to_string();
+        self
+    }
+
+    fn default_bind_addr() -> String {
+        "127.0.0.1".into()
+    }
+
+    fn default_bind_port() -> u16 {
+        3000
+    }
+
+    fn default_max_concurrent_requests() -> u32 {
+        4096
+    }
+
+    fn default_max_request_per_sec() -> u32 {
+        100
+    }
+
+    fn default_max_payload_size_bytes() -> byte_unit::Byte {
+        byte_unit::Byte::from_u64(32 * 1024)
+    }
+
+    fn default_trim_trailing_slash() -> bool {
+        true
+    }
+    fn default_with_metrics() -> bool {
+        true
+    }
+    fn default_liveness_route() -> String {
+        "/live".into()
+    }
+
+    fn default_readiness_route() -> String {
+        "/ready".into()
+    }
+
+    fn default_metrics_route() -> String {
+        "/metrics".into()
+    }
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        HttpConfig {
+            bind_addr: Self::default_bind_addr(),
+            bind_port: Self::default_bind_port(),
+            max_payload_size_bytes: Self::default_max_payload_size_bytes(),
+            max_concurrent_requests: Self::default_max_concurrent_requests(),
+            max_request_per_sec: Self::default_max_request_per_sec(),
+            support_compression: false,
+            with_metrics: Self::default_with_metrics(),
+            trim_trailing_slash: Self::default_trim_trailing_slash(),
+            request_timeout: None,
+            liveness_route: Self::default_liveness_route(),
+            readiness_route: Self::default_readiness_route(),
+            metrics_route: Self::default_metrics_route(),
+        }
+    }
 }
 
 ///
-/// Configuration for logging and tracing.
+/// Configuration for HTTP authentication.
 ///
-#[derive(Debug, Deserialize)]
-pub struct LoggingConfig {
-    /// Format for log output.
-    /// The default format is `default`, which is "full" human-readable format.
-    /// Other options are `json`, `compact`, and `pretty`.
-    pub format: LogFormat,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogFormat {
-    Json,
-    Default,
-    Compact,
-    Pretty,
-}
-
-#[derive(Debug, Deserialize)]
+/// Should the service require authentication, this configuration can be used to configure authentication.
+/// The supported authentication methods are:
+///
+/// - OIDC (OpenID Connect)
+/// - Bearer Tokens (not yet implemented)
+/// - Basic Auth (not yet implemented)
+///
+#[derive(Debug, Deserialize, Default)]
 pub struct HttpAuthConfig {
     /// Configuration for OIDC authentication
     #[serde(default)]
@@ -188,155 +336,72 @@ pub struct HttpAuthConfig {
 ///
 #[derive(Debug, Deserialize)]
 pub struct HttpAuthOidcConfig {
-    issuer_url: String,
-    client_id: String,
-    client_secret: String,
-    callback_url: String,
-    state: bool,
-    pkce: bool,
-}
-
-fn default_max_pool_size() -> u8 {
-    2
-}
-
-fn default_bind_addr() -> String {
-    "127.0.0.1".into()
-}
-
-fn default_bind_port() -> u16 {
-    3000
-}
-
-fn default_max_concurrent_requests() -> usize {
-    2048
-}
-
-fn default_max_payload_size_bytes() -> byte_unit::Byte {
-    byte_unit::Byte::from_u64(256 * 1024)
-}
-
-fn default_health_route() -> String {
-    "/live".into()
-}
-
-fn default_readiness_route() -> String {
-    "/ready".into()
-}
-
-fn default_metrics_route() -> String {
-    "/metrics".into()
-}
-
-fn default_trim_trailing_slash() -> bool {
-    true
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub callback_url: String,
 }
 
 ///
-/// Given an [`RuntimeEnv`], loads the corresponding configuration file,
-/// substitutes any environment variables, and returns a Config struct.
+/// Configuration for the database connection pool.
 ///
-pub fn load_config_for_env(env: RuntimeEnv) -> Result<Config> {
-    let path = format!("config/{}.toml", env.as_str());
-    let text = fs::read_to_string(path)?;
-    text.parse()
+#[cfg(feature = "postgres")]
+#[derive(Debug, Deserialize, Default)]
+pub struct DatabaseConfig {
+    /// Database connection URL.
+    /// This should be a valid Postgres connection string in URL format.
+    /// For example, "postgres://user:password@localhost:5432/database".
+    /// This value is required.
+    #[serde(default = "DatabaseConfig::default_url")]
+    pub url: String,
+
+    /// Sets the maximum number of connections in the pool.
+    /// By default `max_pool_size` is set to 2.
+    #[serde(default = "DatabaseConfig::default_max_pool_size")]
+    pub max_pool_size: u8,
+
+    /// Maximum idle time for connections in the pool.
+    /// Connections that have been idle for longer than this duration
+    /// will be closed. For example, a value of "5m" would set the
+    /// maximum idle time to 5 minutes. By default `max_idle_time` is None.
+    #[serde(default, with = "humantime_serde")]
+    pub max_idle_time: Option<Duration>,
 }
 
-///
-/// Parses a configuration string with references to environment variables
-/// into a Config struct by substituting the environment variables and then
-/// parsing the resulting TOML.
-///
-impl FromStr for Config {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        let config_file = replace_handlebars_with_env(s);
-        let config = toml::from_str::<Config>(&config_file)?;
-        Ok(config)
+#[cfg(feature = "postgres")]
+impl DatabaseConfig {
+    fn default_url() -> String {
+        env::var("DATABASE_URL").unwrap_or_default()
+    }
+    fn default_max_pool_size() -> u8 {
+        2
     }
 }
 
 ///
-/// Looks through the input string for any {{ VAR_NAME }} patterns
-/// and substitutes them with the corresponding environment variable value.
+/// Configuration for logging and tracing.
 ///
-pub fn replace_handlebars_with_env(input: &str) -> String {
-    HANDLEBAR_REGEXP
-        .replace_all(input, |caps: &Captures| {
-            env::var(&caps[1]).unwrap_or_default()
-        })
-        .to_string()
+#[derive(Debug, Deserialize, Default)]
+pub struct LoggingConfig {
+    /// Format for log output.
+    /// The default format is `default`, which is "full" human-readable format.
+    /// Other options are `json`, `compact`, and `pretty`.
+    pub format: LogFormat,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    Json,
+    #[default]
+    Default,
+    Compact,
+    Pretty,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_runtime_env_from_str() {
-        assert!(matches!(
-            "dev".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Dev
-        ));
-        assert!(matches!(
-            "Dev".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Dev
-        ));
-        assert!(matches!(
-            "DEV".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Dev
-        ));
-        assert!(matches!(
-            "tuni".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Tuni
-        ));
-        assert!(matches!(
-            "intg".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Intg
-        ));
-        assert!(matches!(
-            "ctlq".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Ctlq
-        ));
-        assert!(matches!(
-            "ctlq-m1".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::CtlqM1
-        ));
-        assert!(matches!(
-            "ctlqm1".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::CtlqM1
-        ));
-        assert!(matches!(
-            "prod".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::Prod
-        ));
-        assert!(matches!(
-            "prod-m1".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::ProdM1
-        ));
-        assert!(matches!(
-            "prodm1".parse::<RuntimeEnv>().unwrap(),
-            RuntimeEnv::ProdM1
-        ));
-    }
-
-    #[test]
-    fn test_runtime_env_from_str_invalid() {
-        assert!("invalid".parse::<RuntimeEnv>().is_err());
-        assert!("".parse::<RuntimeEnv>().is_err());
-        assert!("production".parse::<RuntimeEnv>().is_err());
-    }
-
-    #[test]
-    fn test_runtime_env_as_str() {
-        assert_eq!(RuntimeEnv::Dev.as_str(), "dev");
-        assert_eq!(RuntimeEnv::Tuni.as_str(), "tuni");
-        assert_eq!(RuntimeEnv::Intg.as_str(), "intg");
-        assert_eq!(RuntimeEnv::Ctlq.as_str(), "ctlq");
-        assert_eq!(RuntimeEnv::CtlqM1.as_str(), "ctlq-m1");
-        assert_eq!(RuntimeEnv::Prod.as_str(), "prod");
-        assert_eq!(RuntimeEnv::ProdM1.as_str(), "prod-m1");
-    }
 
     #[test]
     fn test_replace_handlebars_with_env_no_variables() {
@@ -406,18 +471,19 @@ mod tests {
     #[test]
     fn test_config_from_str_valid() {
         unsafe {
-            env::set_var("DB_URL", "postgres://localhost/test");
+            env::set_var("DATABASE_URL", "postgres://localhost/test");
         }
 
         let config_str = r#"
 [database]
-url = "{{ DB_URL }}"
+url = "{{ DATABASE_URL }}"
 max_pool_size = 10
 
 [http]
 bind_addr = "0.0.0.0"
 bind_port = 8080
 max_payload_size_bytes = "1MB"
+max_requests_per_sec = 5000
 
 [http.routes]
 liveness = "/health"
@@ -440,12 +506,13 @@ format = "json"
         assert!(config.is_ok());
 
         let config = config.unwrap();
+        #[cfg(feature = "postgres")]
         assert_eq!(config.database.url, "postgres://localhost/test");
         assert_eq!(config.http.bind_addr, "0.0.0.0");
         assert_eq!(config.http.bind_port, 8080);
 
         unsafe {
-            env::remove_var("DB_URL");
+            env::remove_var("DATABASE_URL");
         }
     }
 
@@ -465,5 +532,164 @@ url = "postgres://localhost/test"
 
         let result = incomplete_config.parse::<Config>();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_builder_matches_toml_equivalent() {
+        // Build a configuration using builder methods
+        let builder_config = Config::default()
+            .with_bind_addr("0.0.0.0")
+            .with_bind_port(8080)
+            .with_max_concurrent_requests(2048)
+            .with_request_timeout(Duration::from_secs(30))
+            .with_max_payload_size_bytes(2 * 1024 * 1024) // 2 MiB
+            .with_compression(true)
+            .with_trim_trailing_slash(false)
+            .with_liveness_route("/health")
+            .with_readiness_route("/ready")
+            .with_metrics_route("/prometheus")
+            .with_log_format(LogFormat::Compact);
+
+        #[cfg(feature = "postgres")]
+        let builder_config = builder_config
+            .with_pg_url("postgres://user:pass@localhost:5432/mydb")
+            .with_pg_max_pool_size(20)
+            .with_pg_max_idle_time(Duration::from_secs(300));
+
+        // Create an equivalent configuration from TOML
+        let toml_str = r#"
+[http]
+bind_addr = "0.0.0.0"
+bind_port = 8080
+max_concurrent_requests = 2048
+request_timeout = "30s"
+max_payload_size_bytes = "2MiB"
+support_compression = true
+trim_trailing_slash = false
+liveness_route = "/health"
+readiness_route = "/ready"
+metrics_route = "/prometheus"
+
+[database]
+url = "postgres://user:pass@localhost:5432/mydb"
+max_pool_size = 20
+max_idle_time = "300s"
+
+[logging]
+format = "compact"
+        "#;
+
+        let toml_config: Config = toml_str.parse().expect("Failed to parse TOML config");
+
+        // Compare HTTP configuration
+        assert_eq!(builder_config.http.bind_addr, toml_config.http.bind_addr);
+        assert_eq!(builder_config.http.bind_port, toml_config.http.bind_port);
+        assert_eq!(
+            builder_config.http.max_concurrent_requests,
+            toml_config.http.max_concurrent_requests
+        );
+        assert_eq!(
+            builder_config.http.request_timeout,
+            toml_config.http.request_timeout
+        );
+        assert_eq!(
+            builder_config.http.max_payload_size_bytes.as_u64(),
+            toml_config.http.max_payload_size_bytes.as_u64()
+        );
+        assert_eq!(
+            builder_config.http.support_compression,
+            toml_config.http.support_compression
+        );
+        assert_eq!(
+            builder_config.http.trim_trailing_slash,
+            toml_config.http.trim_trailing_slash
+        );
+        assert_eq!(
+            builder_config.http.liveness_route,
+            toml_config.http.liveness_route
+        );
+        assert_eq!(
+            builder_config.http.readiness_route,
+            toml_config.http.readiness_route
+        );
+        assert_eq!(
+            builder_config.http.metrics_route,
+            toml_config.http.metrics_route
+        );
+
+        // Compare database configuration (if postgres feature is enabled)
+        #[cfg(feature = "postgres")]
+        {
+            assert_eq!(builder_config.database.url, toml_config.database.url);
+            assert_eq!(
+                builder_config.database.max_pool_size,
+                toml_config.database.max_pool_size
+            );
+            assert_eq!(
+                builder_config.database.max_idle_time,
+                toml_config.database.max_idle_time
+            );
+        }
+
+        // Compare logging configuration
+        assert!(matches!(builder_config.logging.format, LogFormat::Compact));
+        assert!(matches!(toml_config.logging.format, LogFormat::Compact));
+    }
+
+    #[test]
+    fn test_config_builder_chaining() {
+        // Test that builder methods can be chained fluently
+        let config = Config::default()
+            .with_bind_addr("127.0.0.1")
+            .with_bind_port(3000)
+            .with_compression(true)
+            .with_log_format(LogFormat::Json);
+
+        assert_eq!(config.http.bind_addr, "127.0.0.1");
+        assert_eq!(config.http.bind_port, 3000);
+        assert_eq!(config.http.full_bind_addr(), "127.0.0.1:3000");
+        assert!(config.http.support_compression);
+        assert!(matches!(config.logging.format, LogFormat::Json));
+    }
+
+    #[test]
+    fn test_config_builder_partial_configuration() {
+        // Test that we can use builder methods to override just some defaults
+        let config = Config::default()
+            .with_bind_port(9000)
+            .with_max_concurrent_requests(500);
+
+        // Check overridden values
+        assert_eq!(config.http.bind_port, 9000);
+        assert_eq!(config.http.max_concurrent_requests, 500);
+
+        // Check that defaults remain for non-overridden values
+        assert_eq!(config.http.bind_addr, "127.0.0.1");
+        assert_eq!(config.http.full_bind_addr(), "127.0.0.1:9000");
+        assert_eq!(config.http.liveness_route, "/live");
+        assert_eq!(config.http.readiness_route, "/ready");
+    }
+
+    #[test]
+    fn test_load_from_rust_env() {
+        unsafe {
+            env::set_var("RUST_ENV", "test");
+        }
+
+        let result = Config::from_rust_env();
+        assert!(
+            result.is_ok(),
+            "Expected configuration file to load successfully"
+        );
+
+        unsafe {
+            env::remove_var("RUST_ENV");
+        }
+
+        let result = Config::from_rust_env();
+        assert!(
+            result.is_err(),
+            "Expected error when loading non-existent default config file"
+        );
     }
 }

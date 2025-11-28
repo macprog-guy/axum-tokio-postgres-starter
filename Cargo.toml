@@ -1,10 +1,11 @@
 [package]
-name = "datastar-demo"
+name = "axum-tokio"
 version = "0.1.0"
 edition = "2024"
+authors = ["Eric Methot <emethot@pictet.com>"]
+description = "A library to simplify the use of Axum, Tokio and Postgres together."
+license = "MIT"
 
-[lib]
-name = "datastarlib"
 
 [profile.release]
 opt-level = 3
@@ -13,34 +14,37 @@ strip = true
 lto = true
 
 [dependencies]
-askama = "0.14.0"
-askama_web = { version = "0.14.6", features = ["axum-0.8"] }
-axum = { version = "0.8.7", features = ["http2"] }
-axum-gate = "1.0.2"
+axum = { version = "0.8.7" }
 axum-prometheus = "0.9.0"
 base64 = "0.22.1"
 byte-unit = {version="5.2.0", features = ["serde"]}
-datastar = "0.3.1"
-deadpool = "0.12.3"
-deadpool-postgres = "0.14.1"
+deadpool = {version="0.12.3", optional=true}
+deadpool-postgres = {version="0.14.1", optional=true}
 dotenvy = "0.15.7"
 http = "1.4.0"
 humantime = "2.3.0"
 humantime-serde = "1.1.1"
 mimalloc = "0.1.48"
 regex = "1.12.2"
-rustls = { version = "0.23.35", features = ["ring"] }
-rustls-native-certs = "0.8.2"
+rustls = { version = "0.23.35", features = ["ring"], optional=true}
+rustls-native-certs = {version="0.8.2", optional=true}
 serde = {version="1.0.228", features = ["derive"]}
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
-tokio-postgres = "0.7.15"
-tokio-postgres-rustls = { version = "0.13.0" }
+tokio-postgres = {version="0.7.15", optional=true}
+tokio-postgres-rustls = { version = "0.13.0", optional=true }
 toml = {version="0.9.8", features = ["preserve_order"]}
 tower = {version="0.5.2", features=["limit"]}
 tower-http = { version = "0.6.6", features = ["trace", "limit", "cors", "compression-full", "decompression-full", "normalize-path","request-id","sensitive-headers"] }
-tracing = "0.1.41"
+tower_governor = "0.8.0"
+tracing = "0.1.43"
 tracing-error = "0.2.1"
-tracing-subscriber = {version="0.3.20", features = ["env-filter","fmt","json","ansi"]}
+tracing-subscriber = {version="0.3.22", features = ["env-filter","fmt","json","ansi"]}
 uuid = {version="1.18.1", features = ["v7", "serde"]}
+
+
+[features]
+default = ["postgres"]
+postgres = ["rustls", "dep:tokio-postgres", "dep:tokio-postgres-rustls","dep:deadpool", "dep:deadpool-postgres"]
+rustls = ["dep:rustls", "dep:rustls-native-certs"]

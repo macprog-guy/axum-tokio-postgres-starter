@@ -1,13 +1,13 @@
 use {
     http::{HeaderValue, Request},
+    regex::{Captures, Regex},
+    std::{env, sync::LazyLock},
     tower_http::request_id::{MakeRequestId, RequestId},
     uuid::{ContextV7, Timestamp, Uuid},
 };
 
-#[derive(Clone)]
-pub struct AppState {
-    pub dbpool: deadpool_postgres::Pool,
-}
+static HANDLEBAR_REGEXP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{\{\s*([A-Z0-9_]+)\s*\}\}").unwrap());
 
 #[derive(Debug, Clone, Copy)]
 pub struct RequestIdGenerator;
@@ -24,4 +24,16 @@ impl MakeRequestId for RequestIdGenerator {
             }
         }
     }
+}
+
+///
+/// Looks through the input string for any {{ VAR_NAME }} patterns
+/// and substitutes them with the corresponding environment variable value.
+///
+pub fn replace_handlebars_with_env(input: &str) -> String {
+    HANDLEBAR_REGEXP
+        .replace_all(input, |caps: &Captures| {
+            env::var(&caps[1]).unwrap_or_default()
+        })
+        .to_string()
 }
