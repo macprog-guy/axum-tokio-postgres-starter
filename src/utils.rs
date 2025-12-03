@@ -1,6 +1,7 @@
 use {
     http::{HeaderValue, Request},
     regex::{Captures, Regex},
+    serde::Deserialize,
     std::{env, sync::LazyLock},
     tower_http::request_id::{MakeRequestId, RequestId},
     uuid::{ContextV7, Timestamp, Uuid},
@@ -8,6 +9,30 @@ use {
 
 static HANDLEBAR_REGEXP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{\s*([A-Z0-9_]+)\s*\}\}").unwrap());
+
+///
+/// Simple wrapper around sensitive secrets.
+///
+#[derive(Clone, Deserialize, Default)]
+pub struct Sensitive<T: Default>(pub T);
+
+impl Sensitive<String> {
+    pub fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl<T: Default + PartialEq> PartialEq for Sensitive<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Default> std::fmt::Debug for Sensitive<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sensitive(****)")
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RequestIdGenerator;

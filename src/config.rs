@@ -17,20 +17,27 @@
 //! - `HttpConfig` for HTTP server settings
 //! - `DatabaseConfig` for database connection pool settings
 //! - `LoggingConfig` for logging and tracing settings
+//! - `StaticDirConfig` for static file serving settings
 //!
 //!
+#[cfg(feature = "keycloak")]
+use crate::Sensitive;
 pub use byte_unit::Byte;
+
 use {
     crate::{Error, Result, replace_handlebars_with_env},
     serde::Deserialize,
     std::{env, fs, str::FromStr, time::Duration},
 };
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub http: HttpConfig,
     #[cfg(feature = "postgres")]
+    #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
 }
 
@@ -40,8 +47,7 @@ impl Config {
     /// If RUST_ENV is not set, defaults to "prod".
     ///
     pub fn from_rust_env() -> Result<Config> {
-        let env = env::var("RUST_ENV").unwrap_or_else(|_| "prod".into());
-        Self::from_toml_file(env)
+        Self::from_toml_file(env::var("RUST_ENV")?)
     }
 
     ///
@@ -65,7 +71,7 @@ impl Config {
 
     /// Sets the HTTP server bind address of the HttpConfig.
     pub fn with_bind_addr<S: AsRef<str>>(mut self, addr: S) -> Self {
-        self.http.with_bind_addr(addr);
+        self.http.bind_addr = addr.as_ref().into();
         self
     }
 
@@ -148,6 +154,27 @@ impl Config {
         self.logging.format = format;
         self
     }
+
+    /// Sets the OIDC configuration of the HttpConfig.
+    /// The default OIDC configuration is empty and must be set explicitly
+    /// either programmatically or via TOML.
+    #[cfg(feature = "keycloak")]
+    pub fn with_oidc_config(mut self, oidc_config: HttpOidcConfig) -> Self {
+        self.http.oidc = Some(oidc_config);
+        self
+    }
+
+    /// Ensures that the configuration is valid.
+    /// Most configuration values are either optional or have sensible defaults.
+    /// Some are required and since and here we ensure that those required values
+    /// are set.
+    pub fn validate(&self) -> Result<()> {
+        #[cfg(feature = "postgres")]
+        self.database.validate()?;
+        self.http.validate()?;
+        self.logging.validate()?;
+        Ok(())
+    }
 }
 
 ///
@@ -171,7 +198,7 @@ impl FromStr for Config {
 /// of the HTTP server, including binding address and port, request limits,
 /// timeouts, and specific route paths.
 ///
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HttpConfig {
     /// IP address to bind the HTTP server to
     /// The default `bind_addr` is "127.0.0.1".
@@ -186,15 +213,15 @@ pub struct HttpConfig {
     /// Maximum number of concurrent requests to handle.
     /// If the number of concurrent requests exceeds this number, new requests
     /// will be rejected with a 503 Service Unavailable response.
-    /// By default `max_concurrent_requests` is set to 2048.
+    /// By default `max_concurrent_requests` is set to 4096.
     #[serde(default = "HttpConfig::default_max_concurrent_requests")]
     pub max_concurrent_requests: u32,
 
     /// Maximum number of request per second (per IP address).
     /// If the rate is exceeded, new requests to the server will be rejected
     /// with a 429 Too Many Requests. The default is 100 requests per second.
-    #[serde(default = "HttpConfig::default_max_request_per_sec")]
-    pub max_request_per_sec: u32,
+    #[serde(default = "HttpConfig::default_max_requests_per_sec")]
+    pub max_requests_per_sec: u32,
 
     /// Maximum allowed time for a request to complete before timing out.
     /// If a request takes longer than this it will be aborted with a 408
@@ -241,6 +268,17 @@ pub struct HttpConfig {
     /// Prometheus metrics. By default `metrics` is set to "/metrics".
     #[serde(default = "HttpConfig::default_metrics_route")]
     pub metrics_route: String,
+
+    /// Configuration for serving static files.
+    #[serde(default)]
+    pub directories: Vec<StaticDirConfig>,
+
+    /// OIDC authentication configuration.
+    /// Only included if the "oidc" feature is enabled.
+    /// When None, OIDC authentication is disabled.
+    #[cfg(feature = "keycloak")]
+    #[serde(default)]
+    pub oidc: Option<HttpOidcConfig>,
 }
 
 impl HttpConfig {
@@ -249,11 +287,6 @@ impl HttpConfig {
     ///
     pub fn full_bind_addr(&self) -> String {
         format!("{}:{}", self.bind_addr, self.bind_port)
-    }
-
-    pub fn with_bind_addr<S: AsRef<str>>(&mut self, addr: S) -> &mut Self {
-        self.bind_addr = addr.as_ref().to_string();
-        self
     }
 
     fn default_bind_addr() -> String {
@@ -268,7 +301,7 @@ impl HttpConfig {
         4096
     }
 
-    fn default_max_request_per_sec() -> u32 {
+    fn default_max_requests_per_sec() -> u32 {
         100
     }
 
@@ -293,6 +326,13 @@ impl HttpConfig {
     fn default_metrics_route() -> String {
         "/metrics".into()
     }
+    fn validate(&self) -> Result<()> {
+        #[cfg(feature = "keycloak")]
+        if let Some(oidc_config) = &self.oidc {
+            oidc_config.validate()?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for HttpConfig {
@@ -302,7 +342,7 @@ impl Default for HttpConfig {
             bind_port: Self::default_bind_port(),
             max_payload_size_bytes: Self::default_max_payload_size_bytes(),
             max_concurrent_requests: Self::default_max_concurrent_requests(),
-            max_request_per_sec: Self::default_max_request_per_sec(),
+            max_requests_per_sec: Self::default_max_requests_per_sec(),
             support_compression: false,
             with_metrics: Self::default_with_metrics(),
             trim_trailing_slash: Self::default_trim_trailing_slash(),
@@ -310,43 +350,61 @@ impl Default for HttpConfig {
             liveness_route: Self::default_liveness_route(),
             readiness_route: Self::default_readiness_route(),
             metrics_route: Self::default_metrics_route(),
+            directories: Vec::new(),
+            #[cfg(feature = "keycloak")]
+            oidc: None,
         }
     }
 }
 
 ///
-/// Configuration for HTTP authentication.
-///
-/// Should the service require authentication, this configuration can be used to configure authentication.
-/// The supported authentication methods are:
-///
-/// - OIDC (OpenID Connect)
-/// - Bearer Tokens (not yet implemented)
-/// - Basic Auth (not yet implemented)
-///
-#[derive(Debug, Deserialize, Default)]
-pub struct HttpAuthConfig {
-    /// Configuration for OIDC authentication
-    #[serde(default)]
-    pub oidc: Option<HttpAuthOidcConfig>,
-}
-
-///
 /// Configuration for OIDC authentication.
 ///
-#[derive(Debug, Deserialize)]
-pub struct HttpAuthOidcConfig {
+/// The default value for issuer_url depends on the RUST_ENV environment
+/// variable and will be valid for a PCO deployment.
+///
+#[cfg(feature = "keycloak")]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HttpOidcConfig {
+    #[serde(default)]
     pub issuer_url: String,
+    #[serde(default = "HttpOidcConfig::default_realm")]
+    pub realm: String,
+    #[serde(default)]
+    pub audiences: Vec<String>,
     pub client_id: String,
-    pub client_secret: String,
-    pub callback_url: String,
+    pub client_secret: Sensitive<String>,
+}
+
+impl HttpOidcConfig {
+    pub fn default_realm() -> String {
+        "pictet".into()
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.issuer_url.is_empty() {
+            return Err(Error::Other(
+                "OIDC issuer_url must be set in the configuration",
+            ));
+        }
+        if self.client_id.is_empty() {
+            return Err(Error::Other(
+                "OIDC client_id must be set in the configuration",
+            ));
+        }
+        if self.client_secret.0.is_empty() {
+            return Err(Error::Other(
+                "OIDC client_secret must be set in the configuration",
+            ));
+        }
+        Ok(())
+    }
 }
 
 ///
 /// Configuration for the database connection pool.
 ///
 #[cfg(feature = "postgres")]
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct DatabaseConfig {
     /// Database connection URL.
     /// This should be a valid Postgres connection string in URL format.
@@ -376,12 +434,20 @@ impl DatabaseConfig {
     fn default_max_pool_size() -> u8 {
         2
     }
+    fn validate(&self) -> Result<()> {
+        if self.url.is_empty() {
+            return Err(Error::Other(
+                "Database URL must be set or provided through the DATABASE_URL environment variable",
+            ));
+        }
+        Ok(())
+    }
 }
 
 ///
 /// Configuration for logging and tracing.
 ///
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct LoggingConfig {
     /// Format for log output.
     /// The default format is `default`, which is "full" human-readable format.
@@ -389,7 +455,13 @@ pub struct LoggingConfig {
     pub format: LogFormat,
 }
 
-#[derive(Debug, Deserialize, Default)]
+impl LoggingConfig {
+    pub fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
     Json,
@@ -399,9 +471,64 @@ pub enum LogFormat {
     Pretty,
 }
 
+///
+/// Configuration for serving static files.
+///
+#[derive(Debug, Clone, Deserialize)]
+pub struct StaticDirConfig {
+    pub directory: String,
+    #[serde(flatten)]
+    pub route: StaticDirRoute,
+}
+
+impl StaticDirConfig {
+    pub fn is_fallback(&self) -> bool {
+        matches!(self.route, StaticDirRoute::Fallback(_))
+    }
+    pub fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StaticDirRoute {
+    Route(String),
+    Fallback(bool),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_static_dir_config_parsing() {
+        let config_str = r#"
+        [http]
+        max_payload_size_bytes = "1KiB"
+        
+        [[http.directories]]
+        directory = "static"
+        route = "route"
+        
+        [[http.directories]]
+        directory = "public"
+        fallback = true
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert_eq!(config.http.directories[0].directory, "static");
+        assert!(matches!(
+            config.http.directories[0].route,
+            StaticDirRoute::Route(_)
+        ));
+
+        assert_eq!(config.http.directories[1].directory, "public");
+        assert!(matches!(
+            config.http.directories[1].route,
+            StaticDirRoute::Fallback(_)
+        ));
+    }
 
     #[test]
     fn test_replace_handlebars_with_env_no_variables() {
@@ -416,7 +543,6 @@ mod tests {
             env::set_var("TEST_VAR", "test_value");
             env::set_var("ANOTHER_VAR", "another_value");
         }
-
         let input = "Database URL: {{ TEST_VAR }}, Host: {{ ANOTHER_VAR }}";
         let output = replace_handlebars_with_env(input);
         assert_eq!(output, "Database URL: test_value, Host: another_value");
@@ -485,17 +611,11 @@ bind_port = 8080
 max_payload_size_bytes = "1MB"
 max_requests_per_sec = 5000
 
-[http.routes]
-liveness = "/health"
-metrics = "/metrics"
-
-[http.auth.oidc]
+[http.oidc]
 issuer_url = "https://keycloak.pictet.aws/realms/pictet"
 client_id = "one-environment-pkce"
-client_secret = "{{ OIDC_SECRET }}"
-callback_url = "http://localhost:3000/auth/callback"
-state = true
-pkce = true
+client_secret = "test"
+realm = "pictet"
 
 [logging]
 format = "json"
@@ -524,14 +644,25 @@ format = "json"
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn test_config_from_str_missing_required_fields() {
+        // Test that validation catches missing required fields
+        // In this case, an empty database URL should fail validation
         let incomplete_config = r#"
 [database]
 url = "postgres://localhost/test"
+
+[http]
+max_payload_size_bytes = "1KiB"
         "#;
 
         let result = incomplete_config.parse::<Config>();
-        assert!(result.is_err());
+        assert!(result.is_ok()); // Parsing should succeed with valid values
+        
+        // Now test with an empty database URL - validation should fail
+        let mut config = result.unwrap();
+        config.database.url = "".to_string();
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -569,6 +700,12 @@ trim_trailing_slash = false
 liveness_route = "/health"
 readiness_route = "/ready"
 metrics_route = "/prometheus"
+
+[http.oidc]
+issuer_url = "http://localhost:8080"
+client_id = "test"
+client_secret = "test"
+realm = "test"
 
 [database]
 url = "postgres://user:pass@localhost:5432/mydb"

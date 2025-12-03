@@ -14,5 +14,11 @@ liveness_route = "/live"
 readiness_route = "/ready"
 metrics_route = "/metrics"
 
+[http.oidc]
+issuer_url = "http://localhost:8080"
+client_id = "test"
+client_secret = "test"
+realm = "test"
+
 [logging]
 format = "json"

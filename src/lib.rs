@@ -50,11 +50,12 @@
 //!         .parse()?;
 //!
 //!     // Setup your application routes
-//!     Router::new()
+//!     let app = Router::new()
 //!         .route("/todos", get(todo_list))
-//!         .setup_middleware(&config)?
-//!         .start(config)
-//!         .await
+//!         .setup_middleware(config.clone())
+//!         .await?;
+//!     
+//!     app.start(config).await
 //! }
 //! ```
 //!
@@ -115,11 +116,12 @@
 //! # async fn run() -> Result<()> {
 //! let config: Config = "config.toml".parse()?;
 //!
-//! Router::new()
+//! let app = Router::new()
 //!     .route("/count", get(get_count))
-//!     .setup_middleware(&config)?
-//!     .start(config)
-//!     .await
+//!     .setup_middleware(config.clone())
+//!     .await?;
+//!
+//! app.start(config).await
 //! # }
 //! ```
 //!
@@ -133,7 +135,7 @@
 //! config.http.support_compression = true;
 //! config.http.max_payload_size_bytes = Byte::from_u64(1024 * 1024); // 1 MiB
 //! config.http.max_concurrent_requests = 1000;
-//! config.http.max_request_per_sec = 50;
+//! config.http.max_requests_per_sec = 50;
 //! ```
 //!
 //! ## Module Organization
@@ -174,7 +176,14 @@ pub use configurator::*;
 pub use error::*;
 pub use utils::*;
 
-use tower_governor::governor::GovernorConfigBuilder;
+#[cfg(feature = "keycloak")]
+use axum_keycloak_auth::{
+    PassthroughMode, Url, instance::KeycloakAuthInstance, instance::KeycloakConfig,
+    layer::KeycloakAuthLayer,
+};
+
+#[cfg(feature = "keycloak")]
+pub type Role = String;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -183,12 +192,13 @@ use deadpool_postgres::Pool;
 
 use {
     axum::{Router, extract::DefaultBodyLimit, routing::get},
+    axum_keycloak_auth::decode::ProfileAndEmail,
     axum_prometheus::PrometheusMetricLayerBuilder,
     http::{HeaderName, header::AUTHORIZATION},
     std::{env, iter::once, net::SocketAddr, time::Duration},
     tokio::signal,
     tower::limit::ConcurrencyLimitLayer,
-    tower_governor::GovernorLayer,
+    tower_governor::{GovernorLayer, governor::GovernorConfigBuilder},
     tower_http::{
         compression::CompressionLayer,
         cors::CorsLayer,
@@ -197,11 +207,40 @@ use {
         normalize_path::NormalizePathLayer,
         request_id::{PropagateRequestIdLayer, SetRequestIdLayer},
         sensitive_headers::SetSensitiveHeadersLayer,
+        services::fs::ServeDir,
         trace::TraceLayer as TowerHTTPLayer,
+    },
+    tower_sessions::{
+        Expiry, MemoryStore, SessionManagerLayer,
+        cookie::{SameSite, time::Duration as CookieDuration},
     },
 };
 
 impl Config {
+    pub fn router(&self) -> Router {
+        let mut router = Router::new();
+
+        // Check to see if we have a fallback static files directory
+        if let Some(static_files_dir) = &self.http.directories.iter().find(|dir| dir.is_fallback())
+        {
+            router = router.fallback_service(
+                ServeDir::new(&static_files_dir.directory).append_index_html_on_directories(true),
+            );
+        }
+
+        // Add all other static directories
+        for dir in &self.http.directories {
+            if let StaticDirRoute::Route(route) = &dir.route {
+                router = router.nest_service(
+                    route,
+                    ServeDir::new(&dir.directory).append_index_html_on_directories(true),
+                );
+            }
+        }
+
+        router
+    }
+
     ///
     /// Builds and returns the Axum Router configured according to the Server settings.
     ///
@@ -209,10 +248,13 @@ impl Config {
     ///       is enabled. This is useful to disable during testing to avoid conflicts
     ///       with the global Prometheus registry.
     ///
-    pub fn setup_middleware(&self, router: Router) -> Result<Router> {
+    pub async fn setup_middleware(self, router: Router) -> Result<Router> {
         //
         // Setup the tracing subscriber for logging
         self.setup_tracing_subscriber();
+
+        // Ensure the configuration is valid
+        self.validate()?;
 
         // Output the current version of the service
         const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
@@ -237,6 +279,36 @@ impl Config {
             app = app
                 .route(metrics_path, get(|| async move { metrics_handle.render() }))
                 .layer(prometheus_layer);
+        }
+
+        // Keycloak/OIDC authentication layer
+        #[cfg(feature = "keycloak")]
+        if let Some(oidc) = &self.http.oidc {
+            let keycloak_auth_instance = KeycloakAuthInstance::new(
+                KeycloakConfig::builder()
+                    .server(Url::parse(&oidc.issuer_url)?)
+                    .realm(oidc.realm.clone())
+                    .build(),
+            );
+
+            app = app.route_layer(
+                KeycloakAuthLayer::<Role, ProfileAndEmail>::builder()
+                    .instance(keycloak_auth_instance)
+                    .passthrough_mode(PassthroughMode::Block)
+                    .expected_audiences(oidc.audiences.clone())
+                    .persist_raw_claims(true)
+                    .build(),
+            );
+        }
+
+        #[cfg(feature = "session")]
+        {
+            let session_store = MemoryStore::default();
+            let session_layer = SessionManagerLayer::new(session_store)
+                .with_secure(false)
+                .with_same_site(SameSite::Lax)
+                .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(3600)));
+            app = app.layer(session_layer);
         }
 
         app = app
@@ -283,8 +355,8 @@ impl Config {
         // Used for rate limiting below
         let governor_conf = Box::new(
             GovernorConfigBuilder::default()
-                .per_nanosecond((1_000_000_000 / self.http.max_request_per_sec) as u64)
-                .burst_size(self.http.max_request_per_sec)
+                .per_nanosecond((1_000_000_000 / self.http.max_requests_per_sec) as u64)
+                .burst_size(self.http.max_requests_per_sec)
                 .finish()
                 .expect("Failed to build governor config for rate limiting"),
         );
@@ -305,7 +377,7 @@ impl Config {
 
         tracing::info!("Bound to {}", &bind_addr);
         tracing::info!("Waiting for connections");
-        tracing::info!("Max req/s: {}", self.http.max_request_per_sec);
+        tracing::info!("Max req/s: {}", self.http.max_requests_per_sec);
 
         axum::serve(
             listener,
@@ -483,19 +555,22 @@ format = "json"
         toml_str.parse().expect("Failed to parse test config TOML")
     }
 
-    fn create_test_router(config: Option<Config>) -> Router {
+    async fn create_test_router(config: Option<Config>) -> Router {
+        //
         let router =
             Router::new().route("/noop", get(|| async { "OK\n" }).post(|| async { "OK\n" }));
         let mut config = config.unwrap_or_else(create_base_config);
         config.http.with_metrics = false;
         config
             .setup_middleware(router)
+            .await
             .expect("Failed to setup middleware")
     }
 
     #[tokio::test]
     async fn test_readiness_endpoint_responds() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
         let response = app
             .oneshot(
                 Request::builder()
@@ -516,9 +591,10 @@ format = "json"
 
     #[tokio::test]
     async fn test_liveness_endpoint_uses_configured_path() {
+        //
         let mut config = create_base_config();
         config.http.liveness_route = "/custom-health".to_string();
-        let app = create_test_router(Some(config));
+        let app = create_test_router(Some(config)).await;
 
         let response = app
             .oneshot(
@@ -535,7 +611,7 @@ format = "json"
 
     #[tokio::test]
     async fn test_metrics_endpoint_not_present_without_prometheus() {
-        let app = create_test_router(None);
+        let app = create_test_router(None).await;
 
         // When Prometheus is disabled, the metrics endpoint should return 404
         let response = app
@@ -570,8 +646,8 @@ format = "json"
 
     #[tokio::test]
     async fn test_cors_headers_present() {
-        let app = create_test_router(None);
-
+        //
+        let app = create_test_router(None).await;
         let response = app
             .oneshot(
                 Request::builder()
@@ -597,7 +673,7 @@ format = "json"
     async fn test_compression_layer_applied_when_enabled() {
         let mut config = create_base_config();
         config.http.support_compression = true;
-        let app = create_test_router(Some(config));
+        let app = create_test_router(Some(config)).await;
 
         let response = app
             .oneshot(
@@ -618,8 +694,8 @@ format = "json"
     #[cfg(feature = "postgres")]
     #[test]
     fn test_database_config_applied() {
+        //
         let config = create_base_config();
-
         // Verify the database configuration values are as expected
         assert_eq!(
             config.database.url,
@@ -631,7 +707,6 @@ format = "json"
     #[test]
     fn test_http_config_values() {
         let config = create_base_config();
-
         assert_eq!(config.http.bind_addr, "127.0.0.1");
         assert_eq!(config.http.bind_port, 3000);
         assert_eq!(config.http.max_concurrent_requests, 100);
@@ -642,8 +717,8 @@ format = "json"
 
     #[test]
     fn test_routes_config_values() {
+        //
         let config = create_base_config();
-
         assert_eq!(config.http.liveness_route, "/health");
         assert_eq!(config.http.readiness_route, "/ready");
         assert_eq!(config.http.metrics_route, "/metrics");
@@ -658,7 +733,7 @@ format = "json"
 
     #[tokio::test]
     async fn test_404_for_unknown_routes() {
-        let app = create_test_router(None);
+        let app = create_test_router(None).await;
 
         let response = app
             .oneshot(
@@ -675,6 +750,7 @@ format = "json"
 
     #[test]
     fn test_request_id_generator_creates_uuid() {
+        //
         let mut generator = RequestIdGenerator;
         let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
@@ -691,6 +767,7 @@ format = "json"
 
     #[test]
     fn test_request_id_generator_preserves_existing_id() {
+        //
         let mut generator = RequestIdGenerator;
         let existing_id = "existing-request-id-12345";
         let request = Request::builder()
@@ -711,7 +788,7 @@ format = "json"
 
     #[tokio::test]
     async fn test_request_id_header_added() {
-        let app = create_test_router(None);
+        let app = create_test_router(None).await;
 
         let response = app
             .oneshot(
@@ -736,7 +813,8 @@ format = "json"
 
     #[tokio::test]
     async fn test_request_id_preserved_from_request() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
 
         let custom_id = "my-custom-request-id-123";
 
@@ -764,7 +842,8 @@ format = "json"
 
     #[tokio::test]
     async fn test_state_accessible_in_handlers() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
 
         // Test that the router was successfully built with state
         // The fact that it responds means the state was properly configured
@@ -782,26 +861,17 @@ format = "json"
     }
 
     #[tokio::test]
-    async fn test_concurrency_limit_configuration() {
-        let config = create_base_config();
-
-        // Verify the concurrency limit is configured
-        assert_eq!(config.http.max_concurrent_requests, 100);
-
-        // The ConcurrencyLimitLayer is applied in Server::build with this value
-    }
-
-    #[tokio::test]
     async fn test_compression_disabled_by_default() {
+        //
         let config = create_base_config();
-
         // Verify compression is disabled in base config
         assert!(!config.http.support_compression);
     }
 
     #[tokio::test]
     async fn test_all_middleware_layers_applied() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
 
         // Make a request that exercises multiple middleware layers
         let response = app
@@ -835,6 +905,7 @@ format = "json"
 
     #[tokio::test]
     async fn test_payload_size_limit_configured() {
+        //
         let config = create_base_config();
 
         // Verify that the max payload size limit is properly configured
@@ -848,7 +919,8 @@ format = "json"
 
     #[tokio::test]
     async fn test_payload_within_limit_accepted() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
 
         // Create a payload smaller than the configured limit (1KiB)
         let acceptable_payload = vec![b'x'; 512]; // 512 Bytes
@@ -873,7 +945,8 @@ format = "json"
 
     #[tokio::test]
     async fn test_payload_exceeds_configured_limit() {
-        let app = create_test_router(None);
+        //
+        let app = create_test_router(None).await;
 
         // Create a payload bigger than the configured limit (1KiB)
         let unacceptable_payload = vec![b'x'; 1025]; // 1 KiB + 1 byte

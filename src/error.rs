@@ -17,6 +17,11 @@ pub enum Error {
     #[cfg(feature = "postgres")]
     #[error("Database error: {0}")]
     Database(#[from] tokio_postgres::Error),
+
+    #[cfg(feature = "keycloak")]
+    #[error("Auth error: {0}")]
+    Keycloak(#[from] axum_keycloak_auth::error::AuthError),
+
     #[error("Configuration error: {0}")]
     Config(#[from] toml::de::Error),
 
@@ -27,6 +32,9 @@ pub enum Error {
     #[error("Certificate error: {0}")]
     Certificate(String),
 
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] url::ParseError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -36,9 +44,9 @@ pub enum Error {
     #[error("Unknown environment variable: {0}")]
     UnknownEnv(#[from] std::env::VarError),
 
-    #[error("Unsupported runtime environment: {0}")]
-    UnsupportedEnv(String),
+    #[error("Error: {0}")]
+    Custom(String),
 
-    #[error("Other error: {0}")]
-    Other(String),
+    #[error("Error: {0}")]
+    Other(&'static str),
 }

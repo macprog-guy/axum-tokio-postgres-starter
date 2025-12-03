@@ -3,12 +3,18 @@ use axum::Router;
 use std::future::Future;
 
 pub trait RouterConfigurator {
-    fn setup_middleware(self, config: &Config) -> Result<Router>;
+    fn setup_middleware(
+        self,
+        config: Config,
+    ) -> impl Future<Output = Result<Router>> + Send + 'static;
     fn start(self, config: Config) -> impl Future<Output = Result<()>> + Send + 'static;
 }
 
 impl RouterConfigurator for Router {
-    fn setup_middleware(self, config: &Config) -> Result<Router> {
+    fn setup_middleware(
+        self,
+        config: Config,
+    ) -> impl Future<Output = Result<Router>> + Send + 'static {
         config.setup_middleware(self)
     }
 
@@ -55,7 +61,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         // Test that liveness route works
@@ -80,7 +87,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         // Test that readiness route works
@@ -104,7 +112,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test response" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         // Test that our original route still works
@@ -128,7 +137,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         // Test CORS headers are present
@@ -160,7 +170,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         let response = configured_router
@@ -181,7 +192,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         let response = configured_router
@@ -214,7 +226,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         let response = configured_router
@@ -239,7 +252,8 @@ format = "json"
         let router = Router::new().route("/test", get(|| async { "test" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         let response = configured_router
@@ -265,7 +279,8 @@ format = "json"
             .route("/route3", get(|| async { "response3" }));
 
         let configured_router = router
-            .setup_middleware(&config)
+            .setup_middleware(config)
+            .await
             .expect("Failed to setup middleware");
 
         // Test all routes work

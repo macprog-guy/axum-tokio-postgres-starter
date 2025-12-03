@@ -15,6 +15,7 @@ lto = true
 
 [dependencies]
 axum = { version = "0.8.7" }
+axum-keycloak-auth = {version="0.8.3", features = ["rustls-tls"], optional=true}
 axum-prometheus = "0.9.0"
 base64 = "0.22.1"
 byte-unit = {version="5.2.0", features = ["serde"]}
@@ -36,15 +37,24 @@ tokio-postgres = {version="0.7.15", optional=true}
 tokio-postgres-rustls = { version = "0.13.0", optional=true }
 toml = {version="0.9.8", features = ["preserve_order"]}
 tower = {version="0.5.2", features=["limit"]}
-tower-http = { version = "0.6.6", features = ["trace", "limit", "cors", "compression-full", "decompression-full", "normalize-path","request-id","sensitive-headers"] }
+tower-http = { version = "0.6.7", features = ["trace", "limit", "cors", "compression-full", "decompression-full", "normalize-path","request-id","sensitive-headers","fs"] }
+tower-sessions = {version="0.14.0", features=["axum-core","memory-store"]}
 tower_governor = "0.8.0"
 tracing = "0.1.43"
 tracing-error = "0.2.1"
 tracing-subscriber = {version="0.3.22", features = ["env-filter","fmt","json","ansi"]}
-uuid = {version="1.18.1", features = ["v7", "serde"]}
+url = "2.5.7"
+uuid = {version="1.19.0", features = ["v7", "serde"]}
 
+[dev-dependencies]
+axum = { version = "0.8.4", features = ["macros"] }
+keycloak = "26.4.0"
+reqwest = "0.12"
+testcontainers = "0.26.0"
 
 [features]
-default = ["postgres"]
+default = ["postgres","keycloak","session"]
 postgres = ["rustls", "dep:tokio-postgres", "dep:tokio-postgres-rustls","dep:deadpool", "dep:deadpool-postgres"]
 rustls = ["dep:rustls", "dep:rustls-native-certs"]
+keycloak = ["session","dep:axum-keycloak-auth"]
+session = []
