@@ -33,16 +33,19 @@ format = "json"
 
 /// Helper function to setup a test router with configuration
 async fn create_test_router_with_config(config: Config) -> Router {
+    use pictet_axum_service::FluentRouter;
+
     let mut config = config;
     config.http.with_metrics = false;
 
-    let router = config.router();
-    let router = router.route("/test", get(|| async { "test response" }));
-
-    config
-        .setup_middleware(router)
+    FluentRouter::new(config)
+        .expect("Failed to create FluentRouter")
+        .setup_public_files()
+        .merge(Router::new().route("/test", get(|| async { "test response" })))
+        .setup_middleware()
         .await
         .expect("Failed to setup middleware")
+        .into_inner()
 }
 
 #[tokio::test]

@@ -53,14 +53,17 @@ format = "json"
 
 /// Helper function to create a test router with OIDC enabled
 async fn create_oidc_test_router(config: Config) -> Router {
-    let router = Router::new()
-        .route("/protected", get(|| async { "Protected resource" }))
-        .route("/public", get(|| async { "Public resource" }));
-
-    let app = config
-        .setup_middleware(router)
+    use pictet_axum_service::FluentRouter;
+    
+    let app = FluentRouter::new(config)
+        .expect("Failed to create FluentRouter")
+        .merge(Router::new()
+            .route("/protected", get(|| async { "Protected resource" }))
+            .route("/public", get(|| async { "Public resource" })))
+        .setup_middleware()
         .await
-        .expect("Failed to setup middleware");
+        .expect("Failed to setup middleware")
+        .into_inner();
 
     // Give the OIDC discovery a moment to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -223,13 +226,16 @@ format = "json"
     // Verify OIDC is None
     assert!(config.http.oidc.is_none());
 
-    let router = Router::new().route("/test", get(|| async { "Test endpoint" }));
-
     // Should successfully setup middleware without OIDC
-    let app = config
-        .setup_middleware(router)
+    use pictet_axum_service::FluentRouter;
+    
+    let app = FluentRouter::new(config)
+        .expect("Failed to create FluentRouter")
+        .merge(Router::new().route("/test", get(|| async { "Test endpoint" })))
+        .setup_middleware()
         .await
-        .expect("Failed to setup middleware");
+        .expect("Failed to setup middleware")
+        .into_inner();
 
     // Should be able to access endpoints without auth
     let response = app

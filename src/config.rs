@@ -20,12 +20,18 @@
 //! - `StaticDirConfig` for static file serving settings
 //!
 //!
+use crate::FluentRouter;
+
+#[cfg(feature = "postgres")]
+use deadpool_postgres::Pool;
+
 #[cfg(feature = "keycloak")]
 use crate::Sensitive;
 pub use byte_unit::Byte;
 
 use {
     crate::{Error, Result, replace_handlebars_with_env},
+    http::{HeaderName, Method},
     serde::Deserialize,
     std::{env, fs, str::FromStr, time::Duration},
 };
@@ -164,6 +170,14 @@ impl Config {
         self
     }
 
+    /// Sets the CORS configuration of the HttpConfig.
+    /// The default CORS configuration is empty resulting in permissive CORS configuration.
+    /// Strict CORS must be set explicitly either programmatically or via TOML.
+    pub fn with_cors_config(mut self, cors_config: HttpCorsConfig) -> Self {
+        self.http.cors = Some(cors_config);
+        self
+    }
+
     /// Ensures that the configuration is valid.
     /// Most configuration values are either optional or have sensible defaults.
     /// Some are required and since and here we ensure that those required values
@@ -174,6 +188,105 @@ impl Config {
         self.http.validate()?;
         self.logging.validate()?;
         Ok(())
+    }
+
+    ///
+    /// Sets up the tracing subscriber for logging based on the LoggingConfig.
+    ///
+    /// NOTE: This should be called early during startup to ensure logging is configured
+    ///       before any log messages are emitted.
+    ///
+    pub fn setup_tracing(&self) {
+        use tracing_subscriber::{EnvFilter, prelude::*};
+        let env_filter = EnvFilter::from_default_env();
+        match self.logging.format {
+            LogFormat::Json => {
+                let _ = tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer().json())
+                    .with(env_filter)
+                    .try_init();
+            }
+            LogFormat::Default => {
+                let _ = tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(env_filter)
+                    .try_init();
+            }
+            LogFormat::Compact => {
+                let _ = tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer().compact())
+                    .with(env_filter)
+                    .try_init();
+            }
+            LogFormat::Pretty => {
+                let _ = tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer().pretty())
+                    .with(env_filter)
+                    .try_init();
+            }
+        }
+    }
+
+    ///
+    /// Builds and returns a Postgres connection pool based on the configuration.
+    /// The current implementation uses TLS with system root certificates.
+    /// Furthermore, the application_name will be set to the crate package name
+    /// for easier identification in the database logs.
+    ///
+    /// NOTE: load_native_certs does not return a regular Result type. Instead it
+    ///       returns CertificateResult, which contains both a vec of certs and a
+    ///       vec of errors encountered when loading certs. We consider it a
+    ///       failure if any errors were encountered.
+    ///
+    #[cfg(feature = "postgres")]
+    pub fn create_pgpool(&self) -> Result<Pool> {
+        //
+        // Install the default crypto provider if not already installed.
+        // This is needed for rustls to work properly.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Load system root certificates for TLS connections.
+        let mut root_certs = rustls::RootCertStore::empty();
+        let loaded_certs = rustls_native_certs::load_native_certs();
+        if loaded_certs.errors.is_empty() {
+            for cert in loaded_certs.certs {
+                root_certs.add(cert)?;
+            }
+        } else {
+            return Err(crate::error::Error::Certificate(
+                loaded_certs
+                    .errors
+                    .into_iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+
+        // Create a TLS configuration using the loaded root certificates.
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_certs)
+            .with_no_client_auth();
+
+        // Create a connection factory using the TLS configuration.
+        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+
+        // Configure then instantiate the database connection pool.
+        use deadpool_postgres::{ManagerConfig, PoolConfig, Runtime};
+        let mut pool_cfg = deadpool_postgres::Config::new();
+        pool_cfg.url = Some(self.database.url.clone());
+        pool_cfg.application_name = Some(env!("CARGO_PKG_NAME").into());
+        pool_cfg.pool = Some(PoolConfig::new(self.database.max_pool_size as usize));
+        pool_cfg.manager = Some(ManagerConfig::default());
+
+        // Intantiate the pool using the config and TLS connection factory.
+        pool_cfg
+            .create_pool(Some(Runtime::Tokio1), tls)
+            .map_err(Error::from)
+    }
+
+    pub fn router(self) -> Result<FluentRouter> {
+        FluentRouter::new(self)
     }
 }
 
@@ -279,6 +392,9 @@ pub struct HttpConfig {
     #[cfg(feature = "keycloak")]
     #[serde(default)]
     pub oidc: Option<HttpOidcConfig>,
+
+    /// CORS configuration. If not present defaults to permissive CORS.
+    pub cors: Option<HttpCorsConfig>,
 }
 
 impl HttpConfig {
@@ -331,6 +447,9 @@ impl HttpConfig {
         if let Some(oidc_config) = &self.oidc {
             oidc_config.validate()?;
         }
+        for dir in &self.directories {
+            dir.validate()?;
+        }
         Ok(())
     }
 }
@@ -353,6 +472,7 @@ impl Default for HttpConfig {
             directories: Vec::new(),
             #[cfg(feature = "keycloak")]
             oidc: None,
+            cors: None,
         }
     }
 }
@@ -397,6 +517,45 @@ impl HttpOidcConfig {
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HttpCorsConfig {
+    pub allow_credentials: Option<bool>,
+    pub allowed_origins: Option<Vec<String>>,
+    pub allowed_methods: Option<Vec<CorsMethod>>,
+    pub allowed_headers: Option<Vec<CorsHeader>>,
+    pub exposed_headers: Option<Vec<CorsHeader>>,
+    #[serde(default, with = "humantime_serde")]
+    pub max_age: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CorsMethod(pub Method);
+
+impl<'de> Deserialize<'de> for CorsMethod {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let method = Method::from_str(&s).map_err(serde::de::Error::custom)?;
+        Ok(CorsMethod(method))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CorsHeader(pub HeaderName);
+
+impl<'de> Deserialize<'de> for CorsHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let header = HeaderName::from_str(&s).map_err(serde::de::Error::custom)?;
+        Ok(CorsHeader(header))
     }
 }
 
@@ -479,6 +638,8 @@ pub struct StaticDirConfig {
     pub directory: String,
     #[serde(flatten)]
     pub route: StaticDirRoute,
+    #[serde(default)]
+    pub protected: bool,
 }
 
 impl StaticDirConfig {
@@ -486,6 +647,11 @@ impl StaticDirConfig {
         matches!(self.route, StaticDirRoute::Fallback(_))
     }
     pub fn validate(&self) -> Result<()> {
+        if self.is_fallback() && self.protected {
+            return Err(Error::Other(
+                "Fallback static directory cannot be protected",
+            ));
+        }
         Ok(())
     }
 }
@@ -658,7 +824,7 @@ max_payload_size_bytes = "1KiB"
 
         let result = incomplete_config.parse::<Config>();
         assert!(result.is_ok()); // Parsing should succeed with valid values
-        
+
         // Now test with an empty database URL - validation should fail
         let mut config = result.unwrap();
         config.database.url = "".to_string();
@@ -828,5 +994,238 @@ format = "compact"
             result.is_err(),
             "Expected error when loading non-existent default config file"
         );
+    }
+
+    #[test]
+    fn test_cors_config_default() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_none());
+    }
+
+    #[test]
+    fn test_cors_config_empty() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allowed_origins.is_none());
+        assert!(cors.allowed_methods.is_none());
+        assert!(cors.allowed_headers.is_none());
+        assert!(cors.exposed_headers.is_none());
+        assert!(cors.max_age.is_none());
+        assert!(cors.allow_credentials.is_none());
+    }
+
+    #[test]
+    fn test_cors_config_allowed_origins() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_origins = ["https://example.com", "https://api.example.com"]
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allowed_origins.is_some());
+        let origins = cors.allowed_origins.unwrap();
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0], "https://example.com");
+        assert_eq!(origins[1], "https://api.example.com");
+    }
+
+    #[test]
+    fn test_cors_config_allowed_methods() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allowed_methods.is_some());
+        let methods = cors.allowed_methods.unwrap();
+        assert_eq!(methods.len(), 4);
+    }
+
+    #[test]
+    fn test_cors_config_allowed_headers() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_headers = ["Content-Type", "Authorization", "X-Custom-Header"]
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allowed_headers.is_some());
+        let headers = cors.allowed_headers.unwrap();
+        assert_eq!(headers.len(), 3);
+    }
+
+    #[test]
+    fn test_cors_config_exposed_headers() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+exposed_headers = ["X-Total-Count", "X-Page-Number"]
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.exposed_headers.is_some());
+        let headers = cors.exposed_headers.unwrap();
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn test_cors_config_max_age() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+max_age = "3600s"
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.max_age.is_some());
+        assert_eq!(cors.max_age.unwrap(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_cors_config_allow_credentials() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allow_credentials = true
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allow_credentials.is_some());
+        assert!(cors.allow_credentials.unwrap());
+    }
+
+    #[test]
+    fn test_cors_config_complete() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_origins = ["https://example.com"]
+allowed_methods = ["GET", "POST"]
+allowed_headers = ["Content-Type", "Authorization"]
+exposed_headers = ["X-Total-Count"]
+max_age = "7200s"
+allow_credentials = true
+        "#;
+
+        let config = config_str.parse::<Config>().unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+
+        assert!(cors.allowed_origins.is_some());
+        assert_eq!(cors.allowed_origins.unwrap().len(), 1);
+
+        assert!(cors.allowed_methods.is_some());
+        assert_eq!(cors.allowed_methods.unwrap().len(), 2);
+
+        assert!(cors.allowed_headers.is_some());
+        assert_eq!(cors.allowed_headers.unwrap().len(), 2);
+
+        assert!(cors.exposed_headers.is_some());
+        assert_eq!(cors.exposed_headers.unwrap().len(), 1);
+
+        assert!(cors.max_age.is_some());
+        assert_eq!(cors.max_age.unwrap(), Duration::from_secs(7200));
+
+        assert!(cors.allow_credentials.is_some());
+        assert!(cors.allow_credentials.unwrap());
+    }
+
+    #[test]
+    fn test_cors_config_custom_method() {
+        // HTTP spec allows custom method names, so CUSTOM_METHOD should parse successfully
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_methods = ["GET", "CUSTOM_METHOD"]
+        "#;
+
+        let result = config_str.parse::<Config>();
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.http.cors.is_some());
+        let cors = config.http.cors.unwrap();
+        assert!(cors.allowed_methods.is_some());
+        assert_eq!(cors.allowed_methods.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_cors_config_invalid_header() {
+        let config_str = r#"
+[http]
+bind_addr = "127.0.0.1"
+bind_port = 3000
+max_payload_size_bytes = "1KiB"
+
+[http.cors]
+allowed_headers = ["Invalid Header Name!"]
+        "#;
+
+        let result = config_str.parse::<Config>();
+        assert!(result.is_err());
     }
 }
